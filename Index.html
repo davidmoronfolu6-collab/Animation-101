@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Lorenz attractor</title>
+<style>
+  :root {
+    --bg: #e9edf3; --bg-rgb: 233 237 243;
+    --ink: #14182b; --muted: #55607a; --line: #c4cbd9; --panel: rgba(233,237,243,.82);
+    --accent: #c2371f;
+    box-sizing: border-box;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #0b0f1f; --bg-rgb: 11 15 31;
+      --ink: #eef1fb; --muted: #98a3c4; --line: #2a3354; --panel: rgba(11,15,31,.78);
+      --accent: #ff7a59;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #0b0f1f; --bg-rgb: 11 15 31;
+    --ink: #eef1fb; --muted: #98a3c4; --line: #2a3354; --panel: rgba(11,15,31,.78);
+    --accent: #ff7a59;
+  }
+  *, *::before, *::after { box-sizing: inherit; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: var(--bg); color: var(--ink); overflow: hidden;
+    font: 15px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    touch-action: none; -webkit-user-select: none; user-select: none;
+  }
+  canvas { position: fixed; inset: 0; width: 100%; height: 100%; display: block; cursor: grab; }
+  canvas:active { cursor: grabbing; }
+  header {
+    position: fixed; top: 0; left: 0; right: 0; pointer-events: none;
+    padding: calc(env(safe-area-inset-top, 0px) + 16px) 20px 0;
+  }
+  h1 { margin: 0; font: 600 clamp(26px, 6vw, 40px)/1.05 Georgia, "Iowan Old Style", "Times New Roman", serif; letter-spacing: -.01em; }
+  header p { margin: 6px 0 0; max-width: 34ch; color: var(--muted); font-size: 13.5px; }
+  .panel {
+    position: fixed; left: 12px; right: 12px; max-width: 460px;
+    bottom: calc(env(safe-area-inset-bottom, 0px) + 12px);
+    padding: 14px 16px 12px; border: 1px solid var(--line); border-radius: 14px;
+    background: var(--panel); -webkit-backdrop-filter: blur(10px); backdrop-filter: blur(10px);
+  }
+  .eq { margin: 0 0 10px; font: 12.5px/1.5 ui-monospace, "SF Mono", Menlo, Consolas, monospace; color: var(--muted); }
+  .row { display: grid; grid-template-columns: 22px 1fr 44px; align-items: center; gap: 10px; margin: 4px 0; }
+  .row label { font: italic 600 17px Georgia, serif; }
+  .row output { text-align: right; font-variant-numeric: tabular-nums; font-size: 13px; color: var(--muted); }
+  input[type=range] { width: 100%; accent-color: var(--accent); height: 28px; margin: 0; }
+  .btns { display: flex; gap: 8px; margin-top: 10px; }
+  button {
+    flex: 1; min-height: 40px; border-radius: 10px; border: 1px solid var(--line);
+    background: transparent; color: var(--ink); font: 600 14px system-ui, sans-serif; cursor: pointer;
+  }
+  button:first-child { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button:focus-visible, input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+</style>
+</head>
+<body>
+<canvas id="c" aria-label="Animated Lorenz attractor. Drag to rotate."></canvas>
+<header>
+  <h1>Lorenz attractor</h1>
+  <p>Two thousand points, three equations. Drag to turn it. At ρ = 28 no path ever repeats; at low ρ they all settle to a point.</p>
+</header>
+<section class="panel">
+  <p class="eq">dx/dt = σ(y − x)<br>dy/dt = x(ρ − z) − y<br>dz/dt = xy − βz</p>
+  <div class="row"><label for="sg">σ</label><input id="sg" type="range" min="4" max="20" step="0.1" value="10"><output id="sgv"></output></div>
+  <div class="row"><label for="rh">ρ</label><input id="rh" type="range" min="0" max="60" step="0.1" value="28"><output id="rhv"></output></div>
+  <div class="row"><label for="bt">β</label><input id="bt" type="range" min="0.5" max="6" step="0.05" value="2.67"><output id="btv"></output></div>
+  <div class="btns"><button id="reseed">Reseed</button><button id="pause">Pause</button></div>
+</section>
+
+<script>
+(() => {
+  const N = 2000, BUCKETS = 10, SUBSTEPS = 2, DT = 0.0055;
+  const cv = document.getElementById('c'), ctx = cv.getContext('2d');
+  const P = { sg: 10, rh: 28, bt: 2.67 };
+  const X = new Float32Array(N), Y = new Float32Array(N), Z = new Float32Array(N);
+  const PX = new Float32Array(N), PY = new Float32Array(N), SP = new Float32Array(N);
+  const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  let W = 0, H = 0, dpr = 1;
+  let yaw = 0.6, pitch = 1.15, yawV = reduceMotion ? 0 : 0.0016;
+  let paused = false, dragging = false, lastX = 0, lastY = 0, dark = true;
+
+  const isDark = () => {
+    const t = document.documentElement.dataset.theme;
+    return t ? t === 'dark' : matchMedia('(prefers-color-scheme: dark)').matches;
+  };
+  const bgRgb = () => getComputedStyle(document.documentElement).getPropertyValue('--bg-rgb').trim();
+
+  // Colour ramp by speed: cool and slow -> hot and fast. Differs for dark and light themes.
+  let palette = [];
+  function buildPalette() {
+    dark = isDark();
+    palette = Array.from({ length: BUCKETS }, (_, i) => {
+      const t = i / (BUCKETS - 1);
+      return dark
+        ? `hsl(${200 + t * 150} 95% ${52 + t * 14}%)`
+        : `hsl(${232 - t * 232} 78% ${36 - t * 4}%)`;
+    });
+  }
+
+  function resize() {
+    dpr = Math.min(window.devicePixelRatio || 1, 2);
+    W = innerWidth; H = innerHeight;
+    cv.width = W * dpr; cv.height = H * dpr;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.fillStyle = `rgb(${bgRgb()})`; ctx.fillRect(0, 0, W, H);
+    PX.fill(NaN);
+  }
+
+  function seed(i) {
+    X[i] = (Math.random() - 0.5) * 2; Y[i] = (Math.random() - 0.5) * 2; Z[i] = 20 + Math.random() * 12;
+    PX[i] = NaN;
+  }
+  const reseed = () => { for (let i = 0; i < N; i++) seed(i); ctx.fillStyle = `rgb(${bgRgb()})`; ctx.fillRect(0, 0, W, H); };
+
+  // One RK4 step of the Lorenz system for particle i.
+  function step(i) {
+    const { sg, rh, bt } = P;
+    let x = X[i], y = Y[i], z = Z[i];
+    const fx = (x, y) => sg * (y - x);
+    const fy = (x, y, z) => x * (rh - z) - y;
+    const fz = (x, y, z) => x * y - bt * z;
+    const k1x = fx(x, y), k1y = fy(x, y, z), k1z = fz(x, y, z);
+    const h = DT / 2;
+    const ax = x + h * k1x, ay = y + h * k1y, az = z + h * k1z;
+    const k2x = fx(ax, ay), k2y = fy(ax, ay, az), k2z = fz(ax, ay, az);
+    const bx = x + h * k2x, by = y + h * k2y, bz = z + h * k2z;
+    const k3x = fx(bx, by), k3y = fy(bx, by, bz), k3z = fz(bx, by, bz);
+    const cx = x + DT * k3x, cy = y + DT * k3y, cz = z + DT * k3z;
+    const k4x = fx(cx, cy), k4y = fy(cx, cy, cz), k4z = fz(cx, cy, cz);
+    x += DT / 6 * (k1x + 2 * k2x + 2 * k3x + k4x);
+    y += DT / 6 * (k1y + 2 * k2y + 2 * k3y + k4y);
+    z += DT / 6 * (k1z + 2 * k2z + 2 * k3z + k4z);
+    if (!isFinite(x + y + z) || Math.abs(x) > 400) return seed(i);
+    SP[i] = Math.hypot(k1x, k1y, k1z);
+    X[i] = x; Y[i] = y; Z[i] = z;
+  }
+
+  const FOCAL = 120;
+  function project(i, out) {
+    const cz = (P.rh - 1); // centre of the attractor along z
+    const x = X[i], y = Y[i], z = Z[i] - cz;
+    const cy = Math.cos(yaw), sy = Math.sin(yaw), cp = Math.cos(pitch), sp = Math.sin(pitch);
+    const rx = x * cy - y * sy, ry = x * sy + y * cy;
+    const depth = ry * cp - z * sp, up = ry * sp + z * cp;
+    const scale = Math.min(W, H * 0.8) / 62 * FOCAL / (FOCAL + depth);
+    out[0] = W / 2 + rx * scale;
+    out[1] = H * 0.46 - up * scale;
+  }
+
+  const paths = Array.from({ length: BUCKETS }, () => new Path2D());
+  const tmp = [0, 0];
+
+  function frame() {
+    requestAnimationFrame(frame);
+    if (!dragging && !paused) yaw += yawV;
+    if (paused && !dragging) return;
+
+    // Fade the previous frame so every point leaves a trail.
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.fillStyle = `rgb(${bgRgb()} / ${dark ? 0.16 : 0.2})`;
+    ctx.fillRect(0, 0, W, H);
+
+    for (let b = 0; b < BUCKETS; b++) paths[b] = new Path2D();
+    for (let i = 0; i < N; i++) {
+      if (!paused) for (let s = 0; s < SUBSTEPS; s++) step(i);
+      project(i, tmp);
+      if (!Number.isNaN(PX[i]) && Math.abs(tmp[0] - PX[i]) < 80 && Math.abs(tmp[1] - PY[i]) < 80) {
+        const b = Math.min(BUCKETS - 1, (SP[i] / 4.2) | 0);
+        paths[b].moveTo(PX[i], PY[i]); paths[b].lineTo(tmp[0], tmp[1]);
+      }
+      PX[i] = tmp[0]; PY[i] = tmp[1];
+    }
+    ctx.globalCompositeOperation = dark ? 'lighter' : 'source-over';
+    ctx.lineWidth = dark ? 1.4 : 1.2; ctx.lineCap = 'round';
+    for (let b = 0; b < BUCKETS; b++) { ctx.strokeStyle = palette[b]; ctx.stroke(paths[b]); }
+  }
+
+  // Drag to orbit.
+  cv.addEventListener('pointerdown', e => { dragging = true; lastX = e.clientX; lastY = e.clientY; cv.setPointerCapture(e.pointerId); });
+  cv.addEventListener('pointermove', e => {
+    if (!dragging) return;
+    yaw += (e.clientX - lastX) * 0.008;
+    pitch = Math.max(0.15, Math.min(1.5, pitch + (e.clientY - lastY) * 0.006));
+    lastX = e.clientX; lastY = e.clientY; PX.fill(NaN);
+    ctx.fillStyle = `rgb(${bgRgb()})`; ctx.fillRect(0, 0, W, H);
+  });
+  const end = () => { dragging = false; };
+  cv.addEventListener('pointerup', end); cv.addEventListener('pointercancel', end);
+
+  // Sliders.
+  [['sg', 'sgv', 1], ['rh', 'rhv', 1], ['bt', 'btv', 2]].forEach(([id, out, d]) => {
+    const el = document.getElementById(id), o = document.getElementById(out);
+    const sync = () => { P[id] = parseFloat(el.value); o.textContent = P[id].toFixed(d); };
+    el.addEventListener('input', sync); sync();
+  });
+  document.getElementById('reseed').addEventListener('click', reseed);
+  const pb = document.getElementById('pause');
+  pb.addEventListener('click', () => { paused = !paused; pb.textContent = paused ? 'Resume' : 'Pause'; });
+
+  matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => { buildPalette(); resize(); });
+  addEventListener('resize', resize);
+
+  buildPalette(); resize();
+  for (let i = 0; i < N; i++) seed(i);
+  frame();
+})();
+</script>
+</body>
+</html>
